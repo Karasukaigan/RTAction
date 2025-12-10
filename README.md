@@ -35,10 +35,13 @@ RTAction is a browser-based [Tampermonkey](https://www.tampermonkey.net/) script
 
 ## How It Works
 
-1. Retrieve audio data using `AudioContext + MediaElementSource`
-2. Extract waveform data using `AnalyserNode` and compute RMS
-3. Process the RMS value and linearly map it to the range **0–9999**
-4. Send commands to the serial device at fixed intervals via the Web Serial API
+1. Retrieve audio data using `AudioContext + MediaElementSource`.
+
+2. Extract waveform data using `AnalyserNode` and compute RMS.
+
+3. Process the RMS value and linearly map it to the range **0–9999**.
+
+4. Send commands to the serial device at fixed intervals via the Web Serial API.
 
 ## License
 
