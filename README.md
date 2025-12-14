@@ -2,7 +2,9 @@
 
 RTAction is a browser-based [Tampermonkey](https://www.tampermonkey.net/) script that extracts audio waveform features from web-page videos and converts the analysis results into real-time serial commands to drive external hardware devices.
 
-<img src="./assets/screenshot_1.png" alt="" style="width: 300px; height: auto;">
+<img src="./assets/screenshot_4.png" alt="" style="width: 300px; height: auto;">
+
+<img src="./assets/screenshot_3.png" alt="" style="width: 300px; height: auto;">
 
 <img src="./assets/screenshot_2.png" alt="" style="width: 300px; height: auto;">
 
