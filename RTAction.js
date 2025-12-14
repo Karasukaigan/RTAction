@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  一个可以将网页端视频音频实时转化为串口设备动作的工具。A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
@@ -18,7 +18,8 @@
     let previousPos = 9999; // 上一个位置
     window.videoElement = null; // 主视频
     var videoMs = 0; // 当前毫秒数
-    var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 存储最近10个RMS值
+    let currentTargets = [0, 1]; // RMS值分段
+    var videoRms = [0, 0, 0, 0, 0]; // 存储最近5个RMS值
     let getVideoElementButton = null; // 获取视频元素按钮
 
     const langTexts = {
@@ -303,6 +304,55 @@
             display: none;
         `;
 
+        const targetSelect = document.createElement('select');
+        targetSelect.id = 'target-selection';
+        targetSelect.style.cssText = `
+            width: 100%;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid #ced4da;
+            background-color: #fff;
+            font-size: 13px;
+            margin-bottom: 10px;
+        `;
+
+        const options = [
+            { value: "0,1", text: "0, 9999" },
+            { value: "0.2,1", text: "0, 8000" },
+            { value: "raw", text: "Raw" },
+            { value: "0,0.5,1", text: "0, 5000, 9999" },
+            { value: "0,0.3,0.7,1", text: "0, 3000, 7000, 9999" }
+        ];
+        options.forEach(option => {
+            const opt = document.createElement('option');
+            opt.value = option.value;
+            opt.textContent = option.text;
+            targetSelect.appendChild(opt);
+        });
+        targetSelect.value = "0,1";
+
+        targetSelect.addEventListener('change', function() {
+            switch(this.value) {
+                case "0,1":
+                    currentTargets = [0, 1];
+                    break;
+                case "0.2,1":
+                    currentTargets = [0.2, 1];
+                    break;
+                case "raw":
+                    currentTargets = [];
+                    break;
+                case "0,0.5,1":
+                    currentTargets = [0, 0.5, 1];
+                    break;
+                case "0,0.3,0.7,1":
+                    currentTargets = [0, 0.3, 0.7, 1];
+                    break;
+                default:
+                    currentTargets = [0, 1];
+            }
+        });
+
         // 音频波形显示区域
         const audioWaveformDiv = document.createElement('div');
         audioWaveformDiv.id = 'audio-waveform-display';
@@ -324,6 +374,7 @@
         content.appendChild(testConnectionButton);
         content.appendChild(button);
         content.appendChild(timeInfoDiv);
+        content.appendChild(targetSelect);
         content.appendChild(audioWaveformDiv);
 
         panel.appendChild(header);
@@ -585,10 +636,11 @@
     document.head.appendChild(style);
 
     const findClosestValue = (value) => {
+        if (currentTargets.length === 0) {
+            return Math.max(0, Math.min(1, value));
+        }
         const clampedValue = Math.max(0, Math.min(1, value));
-        const targets = [0, 0.25, 0.5, 0.75, 1];
-        
-        return targets.reduce((closest, current) => {
+        return currentTargets.reduce((closest, current) => {
             return Math.abs(current - clampedValue) < Math.abs(closest - clampedValue) 
                 ? current 
                 : closest;
@@ -629,7 +681,7 @@
             if (!window.selectedSerialPort.readable) {
                 await window.selectedSerialPort.open({ baudRate: 115200 });
             }
-            const message = `L0${currentPos}\n`;
+            const message = `L0${currentPos}I150\n`;
             const writer = window.selectedSerialPort.writable.getWriter();
             const encoder = new TextEncoder();
             await writer.write(encoder.encode(message));
