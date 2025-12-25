@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  一个可以将网页端视频音频实时转化为串口设备动作的工具。A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
@@ -16,12 +16,21 @@
     const domain = window.location.hostname; // 域名
     let currentPos = 5000; // 当前位置
     let previousPos = 9999; // 上一个位置
+    let getVideoElementButton = null;
     window.videoElement = null; // 主视频
     var videoMs = 0; // 当前毫秒数
-    let currentTargets = [0, 1]; // RMS值分段
-    var videoRms = [0, 0, 0, 0, 0]; // 存储最近5个RMS值
-    let getVideoElementButton = null; // 获取视频元素按钮
-
+    let currentTargets = []; // RMS值分段，实际已弃用
+    var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个RMS值
+    var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个锯齿波值
+    var previousRms = 0; // 上一次RMS值
+    var sawtoothSkew = 0.6; // 倾斜度，0为反向斜坡，0.5为三角波，1为正向斜坡
+    var sawtoothPhase = 0; // 锯齿波相位
+    var sawtoothAmplitude = 0; // 锯齿波振幅
+    var sawtoothFrequency = 0.3; // 锯齿波频率
+    var beatThreshold = 0.055; // 鼓点检测阈值，越低越敏感
+    var beatHistory = []; // 最近几秒的鼓点时间戳
+    var lastBeatTime = 0; // 上一次检测到鼓点的时间
+    
     const langTexts = {
         'zh': {
             refreshPorts: '选择串口',
@@ -36,21 +45,6 @@
     };
     let currentLang = 'zh';
 
-    // 根据趋势返回最大值或最小值
-    const analyzeTrend = (values) => {
-        let diffSum = 0;
-        for (let i = 1; i < values.length; i++) {
-            diffSum += values[i] - values[i - 1];
-        }
-        if (diffSum > 0) {
-            // 总体上升，返回最大值
-            return Math.max(...values);
-        } else {
-            // 总体下降或持平，返回最小值
-            return Math.min(...values);
-        }
-    };
-
     // 线性映射值到新的范围
     const mapValue = (value, min = 0, max = 1, newMin = 0, newMax = 9999) => {
         const clampedValue = Math.min(Math.max(value, min), max);
@@ -61,8 +55,14 @@
     // 计算位置
     const calcPos = () => {
         previousPos = currentPos;
-        currentPos = Math.round(mapValue(1 - analyzeTrend(videoRms)));
-        // console.log('pos:', currentPos);
+        const isSawtoothMode = document.getElementById('waveform-sawtooth') && document.getElementById('waveform-sawtooth').checked;
+        if (isSawtoothMode) {
+            // 使用锯齿波值计算位置
+            currentPos = Math.round(mapValue((videoSawtooth[videoSawtooth.length - 1] + 1) / 2));
+        } else {
+            // 使用RMS值计算位置
+            currentPos = Math.round(mapValue(1 - videoRms[videoRms.length - 1]));
+        }
         return currentPos;
     };
     
@@ -89,12 +89,10 @@
         }
     }
 
-    // 页面卸载时执行清理
     window.addEventListener('beforeunload', cleanup);
 
     // 创建控制面板
     function createControlPanel() {
-        // 面板容器
         const panel = document.createElement('div');
         panel.id = 'video-control-panel';
         panel.style.cssText = `
@@ -129,7 +127,7 @@
         title.textContent = 'RTAction';
         title.style.cssText = 'font-weight: 600; color: #212529;';
 
-        // 语言切换按钮
+        // 语言切换
         const langToggleContainer = document.createElement('div');
         langToggleContainer.style.cssText = `
             display: flex;
@@ -241,7 +239,6 @@
             }
         }
 
-        // 测试连接功能
         async function testConnection() {
             if (!navigator.serial) {
                 return;
@@ -265,11 +262,10 @@
             }
         }
 
-        // 绑定事件
         refreshPortsButton.addEventListener('click', refreshSerialPorts);
         testConnectionButton.addEventListener('click', testConnection);
 
-        // 按钮
+        // 获取视频元素
         const button = document.createElement('button');
         button.textContent = '获取视频元素';
         button.style.cssText = `
@@ -285,74 +281,46 @@
             margin-bottom: 10px;
         `;
         getVideoElementButton = button;
-        
-        // 结果显示区域
-        const timeInfoDiv = document.createElement('div');
-        timeInfoDiv.id = 'time-info';
-        timeInfoDiv.style.cssText = `
-            font-size: 13px;
-            line-height: 1.5;
-            color: #495057;
-            background: #f8f9fa;
-            padding: 12px;
-            border-radius: 6px;
-            border: 1px solid #e9ecef;
-            margin-top: 8px;
-            margin-bottom: 10px;
-            min-height: 80px;
-            white-space: pre;
-            display: none;
-        `;
 
-        const targetSelect = document.createElement('select');
-        targetSelect.id = 'target-selection';
-        targetSelect.style.cssText = `
-            width: 100%;
+        // 模式选择
+        const waveformTypeDiv = document.createElement('div');
+        waveformTypeDiv.style.cssText = `
+            display: flex;
+            gap: 15px;
+            margin-bottom: 10px;
             padding: 8px;
+            background: #f8f9fa;
             border-radius: 6px;
-            border: 1px solid #ced4da;
-            background-color: #fff;
-            font-size: 13px;
-            margin-bottom: 10px;
         `;
 
-        const options = [
-            { value: "0,1", text: "0, 9999" },
-            { value: "0.2,1", text: "0, 8000" },
-            { value: "raw", text: "Raw" },
-            { value: "0,0.5,1", text: "0, 5000, 9999" },
-            { value: "0,0.3,0.7,1", text: "0, 3000, 7000, 9999" }
-        ];
-        options.forEach(option => {
-            const opt = document.createElement('option');
-            opt.value = option.value;
-            opt.textContent = option.text;
-            targetSelect.appendChild(opt);
-        });
-        targetSelect.value = "0,1";
+        const rmsRadio = document.createElement('input');
+        rmsRadio.type = 'radio';
+        rmsRadio.id = 'waveform-rms';
+        rmsRadio.name = 'waveform-type';
+        rmsRadio.value = 'rms';
 
-        targetSelect.addEventListener('change', function() {
-            switch(this.value) {
-                case "0,1":
-                    currentTargets = [0, 1];
-                    break;
-                case "0.2,1":
-                    currentTargets = [0.2, 1];
-                    break;
-                case "raw":
-                    currentTargets = [];
-                    break;
-                case "0,0.5,1":
-                    currentTargets = [0, 0.5, 1];
-                    break;
-                case "0,0.3,0.7,1":
-                    currentTargets = [0, 0.3, 0.7, 1];
-                    break;
-                default:
-                    currentTargets = [0, 1];
-            }
-        });
+        const rmsLabel = document.createElement('label');
+        rmsLabel.htmlFor = 'waveform-rms';
+        rmsLabel.textContent = 'RMS';
+        rmsLabel.style.cursor = 'pointer';
 
+        const sawtoothRadio = document.createElement('input');
+        sawtoothRadio.type = 'radio';
+        sawtoothRadio.id = 'waveform-sawtooth';
+        sawtoothRadio.name = 'waveform-type';
+        sawtoothRadio.value = 'sawtooth';
+        sawtoothRadio.checked = true; // 默认Sawtooth
+
+        const sawtoothLabel = document.createElement('label');
+        sawtoothLabel.htmlFor = 'waveform-sawtooth';
+        sawtoothLabel.textContent = 'Sawtooth';
+        sawtoothLabel.style.cursor = 'pointer';
+
+        waveformTypeDiv.appendChild(rmsRadio);
+        waveformTypeDiv.appendChild(rmsLabel);
+        waveformTypeDiv.appendChild(sawtoothRadio);
+        waveformTypeDiv.appendChild(sawtoothLabel);
+        
         // 音频波形显示区域
         const audioWaveformDiv = document.createElement('div');
         audioWaveformDiv.id = 'audio-waveform-display';
@@ -373,8 +341,7 @@
         content.appendChild(refreshPortsButton);
         content.appendChild(testConnectionButton);
         content.appendChild(button);
-        content.appendChild(timeInfoDiv);
-        content.appendChild(targetSelect);
+        content.appendChild(waveformTypeDiv);
         content.appendChild(audioWaveformDiv);
 
         panel.appendChild(header);
@@ -382,7 +349,7 @@
 
         document.body.appendChild(panel);
 
-        // 折叠展开功能
+        // 折叠展开
         let isCollapsed = false;
         header.addEventListener('click', () => {
             isCollapsed = !isCollapsed;
@@ -395,16 +362,16 @@
             }
         });
 
-        // 更新结果
-        const updateTimeInfo = (text, color) => {
-            timeInfoDiv.textContent = text;
-            timeInfoDiv.style.color = color;
-        };
-
-        // 按钮点击事件
         button.addEventListener('click', () => {
             try {
                 cleanup();
+
+                // 重置锯齿波相关变量
+                previousRms = 0;
+                sawtoothPhase = 0;
+                sawtoothAmplitude = 0;
+                sawtoothFrequency = 0.3;
+                videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
                 // 查找视频元素
                 let videoWrapSelector = '.bpx-player-video-wrap';
@@ -414,7 +381,6 @@
                 const videoWrap = document.querySelector(videoWrapSelector);
                 const video = videoWrap.querySelector('video');
                 if (!video) {
-                    updateTimeInfo('未找到视频元素', '#dc3545');
                     return;
                 }
                 window.videoElement = video; // 存储到全局变量
@@ -480,64 +446,95 @@
                                 const currentData = new Uint8Array(bufferSize);
                                 analyser.getByteTimeDomainData(currentData);
                                 
-                                // 计算RMS值来平滑波形
+                                // 计算RMS值和锯齿波值
                                 const rmsValue = calculateRMS(currentData);
+                                const sawtoothValue = calculateSawtooth(rmsValue, Date.now());
                                 
-                                // 添加到历史数据 (存储RMS值而不是整个数组)
-                                historyData.push(rmsValue);
+                                // 记录历史值
+                                if (document.getElementById('waveform-sawtooth').checked) {
+                                    historyData.push(sawtoothValue);
+                                } else {
+                                    historyData.push(rmsValue);
+                                }
                                 if (historyData.length > maxFrames) {
                                     historyData.shift();
                                 }
                                 
-                                // 清空画布
+                                // 绘制
                                 ctx.fillStyle = '#f8f9fa';
                                 ctx.fillRect(0, 0, canvas.width, canvas.height);
-                                
-                                // 绘制纵坐标值
                                 ctx.fillStyle = '#6c757d';
                                 ctx.font = '10px Arial';
                                 ctx.textAlign = 'right';
-                                // ctx.fillText('1.0', 20, 10);
-                                // ctx.fillText('0.5', 20, canvas.height/2);
-                                // ctx.fillText('0.0', 20, canvas.height - 2);
-                                ctx.fillText('0', 25, 10);
-                                ctx.fillText('5000', 25, canvas.height/2);
-                                ctx.fillText('9999', 25, canvas.height - 2);
-                                
-                                // 绘制简化波形
-                                if (historyData.length > 1) {
-                                    ctx.lineWidth = 2;
-                                    ctx.strokeStyle = '#0d6efd';
-                                    ctx.beginPath();
-                                    
-                                    const sliceWidth = (canvas.width - 30) / (historyData.length - 1); // 调整宽度以留出纵坐标空间
-                                    
-                                    for (let i = 0; i < historyData.length; i++) {
-                                        // 将RMS值(0-1范围)映射到画布高度
-                                        const y = canvas.height - (historyData[i] * canvas.height);
-                                        
-                                        if (i === 0) {
-                                            ctx.moveTo(30, y); // 从30px开始绘制，为纵坐标留出空间
-                                        } else {
-                                            ctx.lineTo(i * sliceWidth + 30, y); // 同样偏移30px
-                                        }
-                                    }
-                                    
-                                    ctx.stroke();
+                                if (document.getElementById('waveform-sawtooth').checked) {
+                                    ctx.fillText('9999', 25, 10);
+                                    ctx.fillText('5000', 25, canvas.height/2);
+                                    ctx.fillText('0', 25, canvas.height - 2);
+                                } else {
+                                    ctx.fillText('0', 25, 10);
+                                    ctx.fillText('5000', 25, canvas.height/2);
+                                    ctx.fillText('9999', 25, canvas.height - 2);
+                                }    
+                                if (document.getElementById('waveform-sawtooth').checked) {
+                                    // 绘制锯齿波
+                                    drawSawtoothWaveform(ctx, canvas, historyData);
+                                } else {
+                                    // 绘制RMS波形
+                                    drawRmsWaveform(ctx, canvas, historyData);
                                 }
-                                
-                                // 绘制中心线
                                 ctx.lineWidth = 1;
                                 ctx.strokeStyle = '#adb5bd';
                                 ctx.beginPath();
-                                ctx.moveTo(30, canvas.height / 2); // 调整起始点
+                                ctx.moveTo(30, canvas.height / 2);
                                 ctx.lineTo(canvas.width, canvas.height / 2);
                                 ctx.stroke();
                                 
                                 requestAnimationFrame(drawWaveform);
                             }
+
+                            // 绘制RMS波形
+                            function drawRmsWaveform(ctx, canvas, historyData) {
+                                if (historyData.length > 1) {
+                                    ctx.lineWidth = 2;
+                                    ctx.strokeStyle = '#0d6efd';
+                                    ctx.beginPath();
+                                    const sliceWidth = (canvas.width - 30) / (historyData.length - 1);
+                                    for (let i = 0; i < historyData.length; i++) {
+                                        const y = canvas.height - (historyData[i] * canvas.height);
+                                        if (i === 0) {
+                                            ctx.moveTo(30, y);
+                                        } else {
+                                            ctx.lineTo(i * sliceWidth + 30, y);
+                                        }
+                                    }
+                                    ctx.stroke();
+                                }
+                            }
+
+                            // 绘制锯齿波
+                            function drawSawtoothWaveform(ctx, canvas, historyData) {
+                                if (historyData.length > 1) {
+                                    ctx.lineWidth = 2;
+                                    ctx.strokeStyle = '#28a745';
+                                    ctx.beginPath();
+                                    
+                                    const sliceWidth = (canvas.width - 30) / (historyData.length - 1);
+                                    
+                                    for (let i = 0; i < historyData.length; i++) {
+                                        const rawSawtoothValue = historyData[i];
+                                        const y = canvas.height - ((rawSawtoothValue + 1) * 0.5 * canvas.height);
+                                        if (i === 0) {
+                                            ctx.moveTo(30, y);
+                                        } else {
+                                            ctx.lineTo(i * sliceWidth + 30, y);
+                                        }
+                                    }
+                                    
+                                    ctx.stroke();
+                                }
+                            }
                             
-                            drawWaveform(); // 开始绘制
+                            drawWaveform();
                         } catch (e) {
                             waveformDisplay.innerHTML = `<div style="text-align:center;color:#dc3545;">音频分析失败: ${e.message}</div>`;
                             console.error('音频分析错误:', e);
@@ -545,20 +542,15 @@
                     }, 100);
                 }
 
-                // 显示基本信息
-                updateTimeInfo(`总时长: 00:00\n当前时间: 00:00 (${videoMs}ms)\n位置: ${currentPos}\n状态: 准备就绪`, '#495057');
-              
-                // 更新时间显示的函数
+                // 更新时间显示
                 const updateTimeDisplay = () => {
                     videoMs = Math.round(video.currentTime * 1000);
-                    const status = video.paused ? '已暂停' : '正在播放';
                     if (!video.paused) {
                         calcPos();
                         if (previousPos !== currentPos) {
                             sendPositionToSerial();
                         }
                     }
-                    updateTimeInfo(`总时长: ${formatTime(video.duration)}\n当前时间: ${formatTime(video.currentTime)} (${videoMs}ms)\n位置: ${currentPos}\n状态: ${status}`, '#495057');
                 };
 
                 // 清除之前的监听器和定时器
@@ -575,13 +567,11 @@
                     clearInterval(window.videoUpdateInterval);
                 }
 
-                // 使用 setInterval 每150ms执行一次更新
-                window.videoUpdateInterval = setInterval(updateTimeDisplay, 150);
+                // 50ms更新一次
+                window.videoUpdateInterval = setInterval(updateTimeDisplay, 50);
 
-                // 初始更新
-                updateTimeDisplay();
+                updateTimeDisplay(); // 初始更新
             } catch (error) {
-                updateTimeInfo(`发生错误: ${error.message}`, '#dc3545');
                 console.error('获取视频元素失败:', error);
             }
         });
@@ -601,14 +591,13 @@
         }
     }
 
-    // 等待页面加载完成后创建面板
+    // 创建面板
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', createControlPanel);
     } else {
         createControlPanel();
     }
 
-    // 添加一些样式
     const style = document.createElement('style');
     style.textContent = `
         #video-control-panel button:active {
@@ -651,26 +640,90 @@
     function calculateRMS(data) {
         let sum = 0;
         for (let i = 0; i < data.length; i++) {
-            const normalized = (data[i] - 128) / 128; // 转换为-1到1范围
+            const normalized = (data[i] - 128) / 128; // -1~1
             sum += normalized * normalized;
         }
         let rms = Math.sqrt(sum / data.length);
         let result = Math.min(rms * 4, 1); // 放大4倍，但不超过1
         result = findClosestValue(result);
-        videoRms.shift(); // 删除第一个元素（最旧的）
-        videoRms.push(result); // 在末尾添加新的RMS值
-        // console.log(`RMS: ${videoRms}`);
-        return result;
+        videoRms.shift();
+        videoRms.push(result);
+        const smoothedValue = videoRms.reduce((sum, val) => sum + val, 0) / videoRms.length; // 滑动平均
+        return smoothedValue;
     }
 
-    // 格式化时间
-    const formatTime = (seconds) => {
-        if (isNaN(seconds) || seconds < 0) return '00:00:00';
-        const hours = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    };
+    // 计算锯齿波
+    function calculateSawtooth(rmsValue, currentTime = Date.now()) {
+        // 检测鼓点（RMS值是否显著增加）
+        const rmsChange = rmsValue - previousRms;
+        const isBeat = rmsChange > beatThreshold;
+
+        previousRms = rmsValue;
+
+        // 检测到鼓点
+        if (isBeat) {
+            const now = currentTime;
+            beatHistory.push(now);
+            lastBeatTime = now;
+            const twoSecondsAgo = now - 2000; // 2000ms区间
+            beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
+            if (beatHistory.length > 1) {
+                const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
+                if (timeSpan > 0) {
+                    const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // 每秒鼓点数
+                    const beatFrequency = calculateY(beatFrequencyRaw);
+                    let calculatedFrequency = beatFrequency; // 锯齿波频率
+                    calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
+                    sawtoothFrequency = calculatedFrequency;
+                    console.log(`[RMS ${rmsValue}] ${beatFrequencyRaw} -> ${beatFrequency} -> ${calculatedFrequency}`);
+                }
+            } else if (beatHistory.length === 1) {
+                sawtoothFrequency = 0.3; // 只有一个鼓点，使用默认频率
+            }
+        }
+        
+        sawtoothAmplitude = Math.min(rmsValue * 2, 1); // 根据RMS值更新振幅
+        
+        // 计算相位增量
+        if (window.lastSawtoothTime) {
+            const actualDeltaTime = (currentTime - window.lastSawtoothTime) / 1000; // 转换为秒
+            sawtoothPhase += sawtoothFrequency * actualDeltaTime;
+        } else {
+            // 初始时使用固定时间增量
+            const deltaTime = 1/30; // 30fps
+            sawtoothPhase += sawtoothFrequency * deltaTime;
+        }
+        
+        window.lastSawtoothTime = currentTime;
+        
+        // 确保相位在0到1之间
+        if (sawtoothPhase >= 1) {
+            sawtoothPhase -= Math.floor(sawtoothPhase);
+        }
+        
+        // 计算锯齿波值
+        let rawSawtoothValue;
+        if (sawtoothPhase < sawtoothSkew && sawtoothSkew !== 0) {
+            // 上升段
+            rawSawtoothValue = sawtoothPhase / sawtoothSkew;
+        } else if (sawtoothSkew !== 1) {
+            // 下降段
+            rawSawtoothValue = (1 - sawtoothPhase) / (1 - sawtoothSkew);
+        } else {
+            // 特殊情况：完全反向斜坡
+            rawSawtoothValue = 1 - sawtoothPhase;
+        }
+        
+        let normalizedSawtoothValue = rawSawtoothValue * 2 - 1; // 映射至-1到1
+        let sawtoothValue = normalizedSawtoothValue * sawtoothAmplitude; // 应用振幅
+        videoSawtooth.shift();
+        videoSawtooth.push(sawtoothValue);
+        
+        // 计算滑动平均
+        const smoothedValue = videoSawtooth.reduce((sum, val) => sum + val, 0) / videoSawtooth.length;
+        
+        return smoothedValue;
+    }
 
     // 发送位置信息到串口
     const sendPositionToSerial = async () => {
@@ -681,13 +734,22 @@
             if (!window.selectedSerialPort.readable) {
                 await window.selectedSerialPort.open({ baudRate: 115200 });
             }
-            const message = `L0${currentPos}I150\n`;
+            const message = `L0${currentPos}I50\n`;
             const writer = window.selectedSerialPort.writable.getWriter();
             const encoder = new TextEncoder();
             await writer.write(encoder.encode(message));
             writer.releaseLock();
         } catch (error) {
             console.error('发送位置信息失败:', error);
+        }
+    };
+
+    const calculateY = (x) => {
+        if (x <= 4) {
+          return x;
+        } else {
+          const cubeRoot = x >= 0 ? Math.pow(x-1, 1/4) : -Math.pow(1-x, 1/4);
+          return cubeRoot;
         }
     };
 })();
