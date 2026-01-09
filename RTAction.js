@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  一个可以将网页端视频音频实时转化为串口设备动作的工具。A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
@@ -23,11 +23,13 @@
     var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个RMS值
     var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个锯齿波值
     var previousRms = 0; // 上一次RMS值
+    var rmsRising = false; // RMS值是否处在上升阶段
     var sawtoothSkew = 0.6; // 倾斜度，0为反向斜坡，0.5为三角波，1为正向斜坡
     var sawtoothPhase = 0; // 锯齿波相位
     var sawtoothAmplitude = 0; // 锯齿波振幅
     var sawtoothFrequency = 0.3; // 锯齿波频率
-    var beatThreshold = 0.055; // 鼓点检测阈值，越低越敏感
+    var beatThreshold = 0.06; // 鼓点检测阈值，越低越敏感
+    var rmsAmplification = 4; // RMS放大倍率
     var beatHistory = []; // 最近几秒的鼓点时间戳
     var lastBeatTime = 0; // 上一次检测到鼓点的时间
     
@@ -286,7 +288,7 @@
         const waveformTypeDiv = document.createElement('div');
         waveformTypeDiv.style.cssText = `
             display: flex;
-            gap: 15px;
+            gap: 5px;
             margin-bottom: 10px;
             padding: 8px;
             background: #f8f9fa;
@@ -303,6 +305,7 @@
         rmsLabel.htmlFor = 'waveform-rms';
         rmsLabel.textContent = 'RMS';
         rmsLabel.style.cursor = 'pointer';
+        rmsLabel.style.marginRight = '10px';
 
         const sawtoothRadio = document.createElement('input');
         sawtoothRadio.type = 'radio';
@@ -320,6 +323,52 @@
         waveformTypeDiv.appendChild(rmsLabel);
         waveformTypeDiv.appendChild(sawtoothRadio);
         waveformTypeDiv.appendChild(sawtoothLabel);
+
+        // RMS放大倍率滑块
+        const amplificationDiv = document.createElement('div');
+        amplificationDiv.style.cssText = `
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 8px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        `;
+
+        const amplificationSlider = document.createElement('input');
+        amplificationSlider.type = 'range';
+        amplificationSlider.id = 'rms-amplification-slider';
+        amplificationSlider.min = '1';
+        amplificationSlider.max = '10';
+        amplificationSlider.step = '1';
+        amplificationSlider.value = rmsAmplification;
+        amplificationSlider.style.cssText = `
+            flex: 1;
+            margin-right: 8px;
+            -webkit-appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: #dee2e6;
+            outline: none;
+        `;
+
+        const amplificationValue = document.createElement('span');
+        amplificationValue.textContent = `RMS×${rmsAmplification}`;
+        amplificationValue.style.cssText = `
+            font-size: 14px;
+            color: #495057;
+            font-weight: 500;
+            min-width: 25px;
+            text-align: center;
+        `;
+
+        amplificationSlider.addEventListener('input', () => {
+            rmsAmplification = parseInt(amplificationSlider.value);
+            amplificationValue.textContent = `RMS×${rmsAmplification}`;
+        });
+
+        amplificationDiv.appendChild(amplificationSlider);
+        amplificationDiv.appendChild(amplificationValue);
         
         // 音频波形显示区域
         const audioWaveformDiv = document.createElement('div');
@@ -342,6 +391,7 @@
         content.appendChild(testConnectionButton);
         content.appendChild(button);
         content.appendChild(waveformTypeDiv);
+        content.appendChild(amplificationDiv);
         content.appendChild(audioWaveformDiv);
 
         panel.appendChild(header);
@@ -644,11 +694,20 @@
             sum += normalized * normalized;
         }
         let rms = Math.sqrt(sum / data.length);
-        let result = Math.min(rms * 4, 1); // 放大4倍，但不超过1
+        let result = Math.min(rms * rmsAmplification, 1);
         result = findClosestValue(result);
         videoRms.shift();
         videoRms.push(result);
-        const smoothedValue = videoRms.reduce((sum, val) => sum + val, 0) / videoRms.length; // 滑动平均
+
+        let weightedSum = 0;
+        let weightSum = 0;
+        const len = videoRms.length;
+        for (let i = 0; i < len; i++) {
+            const weight = i + 1;
+            weightedSum += videoRms[i] * weight;
+            weightSum += weight;
+        }
+        const smoothedValue = weightedSum / weightSum;
         return smoothedValue;
     }
 
@@ -656,32 +715,51 @@
     function calculateSawtooth(rmsValue, currentTime = Date.now()) {
         // 检测鼓点（RMS值是否显著增加）
         const rmsChange = rmsValue - previousRms;
-        const isBeat = rmsChange > beatThreshold;
-
-        previousRms = rmsValue;
-
-        // 检测到鼓点
-        if (isBeat) {
-            const now = currentTime;
-            beatHistory.push(now);
-            lastBeatTime = now;
-            const twoSecondsAgo = now - 2000; // 2000ms区间
-            beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
-            if (beatHistory.length > 1) {
-                const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
-                if (timeSpan > 0) {
-                    const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // 每秒鼓点数
-                    const beatFrequency = calculateY(beatFrequencyRaw);
-                    let calculatedFrequency = beatFrequency; // 锯齿波频率
-                    calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
-                    sawtoothFrequency = calculatedFrequency;
-                    console.log(`[RMS ${rmsValue}] ${beatFrequencyRaw} -> ${beatFrequency} -> ${calculatedFrequency}`);
-                }
-            } else if (beatHistory.length === 1) {
-                sawtoothFrequency = 0.3; // 只有一个鼓点，使用默认频率
-            }
-        }
+        const thresholdForBeat = 0.2; // 鼓点检测阈值（累计变化量）
         
+        if (rmsValue > previousRms) {
+            // 上升阶段
+            if (!rmsRising) {
+                rmsRising = true;
+                window.rmsAccumulatedIncrease = rmsChange;
+            } else {
+                window.rmsAccumulatedIncrease = (window.rmsAccumulatedIncrease || 0) + rmsChange;
+            }
+        } else {
+            // 从上升转为下降，检查是否达到鼓点阈值
+            if (rmsRising && window.rmsAccumulatedIncrease && window.rmsAccumulatedIncrease >= thresholdForBeat) {
+                const now = currentTime;
+                beatHistory.push(now);
+                lastBeatTime = now;
+                const twoSecondsAgo = now - 1500; // 1500ms区间
+                beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
+                
+                if (beatHistory.length > 1) {
+                    const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
+                    if (timeSpan > 0) {
+                        const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // 每秒鼓点数
+                        const beatFrequency = calculateY(beatFrequencyRaw);
+                        let calculatedFrequency = beatFrequency; // 锯齿波频率
+                        calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
+                        sawtoothFrequency = calculatedFrequency;
+                        if (sawtoothFrequency > 2) {
+                            sawtoothSkew = 0.5;
+                        } else {
+                            sawtoothSkew = 0.6;
+                        }
+                        console.log(`[RMS ${rmsValue}] ${beatFrequencyRaw} -> ${beatFrequency} -> ${calculatedFrequency}`);
+                    }
+                } else if (beatHistory.length === 1) {
+                    sawtoothFrequency = 0.3; // 只有一个鼓点，使用默认频率
+                }
+            }
+            // 结束上升阶段
+            rmsRising = false;
+            window.rmsAccumulatedIncrease = 0; // 重置累积上升值
+        }
+    
+        previousRms = rmsValue;
+    
         sawtoothAmplitude = Math.min(rmsValue * 2, 1); // 根据RMS值更新振幅
         
         // 计算相位增量
@@ -740,7 +818,7 @@
             await writer.write(encoder.encode(message));
             writer.releaseLock();
         } catch (error) {
-            console.error('发送位置信息失败:', error);
+            console.error('发送串口命令失败:', error);
         }
     };
 
