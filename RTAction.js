@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  一个可以将网页端视频音频实时转化为串口设备动作的工具。A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
+// @version      1.5
+// @description  A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
 // @match        https://live.bilibili.com/*
@@ -50,6 +50,7 @@
             getVideoElement: 'Get Video Element',
         }
     };
+    const getBrowserLanguage = () => navigator.language?.split('-')[0] || 'en';
     let currentLang = 'zh';
 
     // 线性映射值到新的范围
@@ -547,6 +548,9 @@
             currentLang = currentLang === 'zh' ? 'en' : 'zh';
             updateLanguage();
         });
+        if (getBrowserLanguage() !== 'zh') {
+            langToggle.click();
+        }
         function updateLanguage() {
             const texts = langTexts[currentLang];
             refreshPortsButton.textContent = texts.refreshPorts;
