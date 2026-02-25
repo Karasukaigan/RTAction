@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.5.5
 // @description  A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
@@ -11,32 +11,31 @@
 // @match        https://*.youtube.com/watch*
 // @match        https://*.tiktok.com/*
 // @match        https://*.twitch.tv/*
-// @include      https://*haven.com/video/*
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    const domain = window.location.hostname; // 域名
-    let currentPos = 5000; // 当前位置
-    let previousPos = 9999; // 上一个位置
+    const domain = window.location.hostname; // Domain name
+    let currentPos = 5000; // Current position
+    let previousPos = 9999; // Previous position
     let getVideoElementButton = null;
-    window.videoElement = null; // 主视频
-    var videoMs = 0; // 当前毫秒数
-    let currentTargets = []; // RMS值分段，实际已弃用
-    var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个RMS值
-    var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 最近10个锯齿波值
-    var previousRms = 0; // 上一次RMS值
-    var rmsRising = false; // RMS值是否处在上升阶段
-    var sawtoothSkew = 0.6; // 倾斜度，0为反向斜坡，0.5为三角波，1为正向斜坡
-    var sawtoothPhase = 0; // 锯齿波相位
-    var sawtoothAmplitude = 0; // 锯齿波振幅
-    var sawtoothFrequency = 0.3; // 锯齿波频率
-    var beatThreshold = 0.06; // 鼓点检测阈值，越低越敏感
-    var rmsAmplification = 4; // RMS放大倍率
-    var beatHistory = []; // 最近几秒的鼓点时间戳
-    var lastBeatTime = 0; // 上一次检测到鼓点的时间
+    window.videoElement = null; // Main video
+    var videoMs = 0; // Current milliseconds
+    let currentTargets = []; // RMS value segments, actually deprecated
+    var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 RMS values
+    var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 sawtooth wave values
+    var previousRms = 0; // Previous RMS value
+    var rmsRising = false; // Whether RMS value is in rising phase
+    var sawtoothSkew = 0.6; // Skewness, 0 for reverse ramp, 0.5 for triangle wave, 1 for forward ramp
+    var sawtoothPhase = 0; // Sawtooth wave phase
+    var sawtoothAmplitude = 0; // Sawtooth wave amplitude
+    var sawtoothFrequency = 0.3; // Sawtooth wave frequency
+    var beatThreshold = 0.06; // Beat detection threshold, lower is more sensitive
+    var rmsAmplification = 4; // RMS amplification factor
+    var beatHistory = []; // Recent beat timestamps
+    var lastBeatTime = 0; // Time of last detected beat
     
     const langTexts = {
         'zh': {
@@ -53,26 +52,26 @@
     const getBrowserLanguage = () => navigator.language?.split('-')[0] || 'en';
     let currentLang = 'zh';
 
-    // 线性映射值到新的范围
+    // Linearly map value to new range
     const mapValue = (value, min = 0, max = 1, newMin = 0, newMax = 9999) => {
         return ((Math.min(Math.max(value, min), max) - min) / (max - min)) * (newMax - newMin) + newMin;
     };
 
-    // 计算位置
+    // Calculate position
     const calcPos = () => {
         previousPos = currentPos;
         const isSawtoothMode = document.getElementById('waveform-sawtooth') && document.getElementById('waveform-sawtooth').checked;
         if (isSawtoothMode) {
-            // 使用锯齿波值计算位置
+            // Use sawtooth wave value to calculate position
             currentPos = Math.round(mapValue((videoSawtooth[videoSawtooth.length - 1] + 1) / 2));
         } else {
-            // 使用RMS值计算位置
+            // Use RMS value to calculate position
             currentPos = Math.round(mapValue(1 - videoRms[videoRms.length - 1]));
         }
         return currentPos;
     };
     
-    // 清理，防止内存泄漏
+    // Cleanup to prevent memory leaks
     function cleanup() {
         if (window.videoUpdateInterval) {
             clearInterval(window.videoUpdateInterval);
@@ -82,7 +81,7 @@
     }
     window.addEventListener('beforeunload', cleanup);
 
-    // 创建控制面板
+    // Create control panel
     function createControlPanel() {
         const panel = document.createElement('div');
         panel.id = 'video-control-panel';
@@ -101,7 +100,7 @@
             overflow: hidden;
         `;
 
-        // 标题栏
+        // Title bar
         const header = document.createElement('div');
         header.style.cssText = `
             padding: 12px 16px;
@@ -118,7 +117,7 @@
         title.textContent = 'RTAction';
         title.style.cssText = 'font-size: 12px; font-weight: 600; color: #212529;';
 
-        // 语言切换
+        // Language toggle
         const langToggleContainer = document.createElement('div');
         langToggleContainer.style.cssText = `
             display: flex;
@@ -140,7 +139,7 @@
         header.appendChild(title);
         header.appendChild(langToggleContainer);
 
-        // 内容区域
+        // Content area
         const content = document.createElement('div');
         content.id = 'panel-content';
         content.style.cssText = `
@@ -149,7 +148,7 @@
             transition: all 0.3s ease;
         `;
 
-        // 串口设置
+        // Serial port settings
         const refreshPortsButton = document.createElement('button');
         refreshPortsButton.textContent = '选择串口';
         refreshPortsButton.style.cssText = `
@@ -193,7 +192,7 @@
             }
         });
 
-        // 选择串口
+        // Select serial port
         async function refreshSerialPorts() {
             try {
                 if (!navigator.serial) {
@@ -241,7 +240,7 @@
         refreshPortsButton.addEventListener('click', refreshSerialPorts);
         testConnectionButton.addEventListener('click', testConnection);
 
-        // 获取视频元素
+        // Get video element
         const button = document.createElement('button');
         button.textContent = '获取视频元素';
         button.style.cssText = `
@@ -259,7 +258,7 @@
         `;
         getVideoElementButton = button;
 
-        // 模式选择
+        // Mode selection
         const waveformTypeDiv = document.createElement('div');
         waveformTypeDiv.style.cssText = `
             display: flex;
@@ -280,7 +279,7 @@
         const rmsLabel = document.createElement('label');
         rmsLabel.htmlFor = 'waveform-rms';
         rmsLabel.textContent = 'RMS';
-        rmsLabel.style.cssText = `color: #000; cuersor: pointer; margin-right: 10px; font-size: 12px;`;
+        rmsLabel.style.cssText = `color: #000; cursor: pointer; margin-right: 10px; font-size: 12px;`;
 
         const sawtoothRadio = document.createElement('input');
         sawtoothRadio.type = 'radio';
@@ -292,14 +291,14 @@
         const sawtoothLabel = document.createElement('label');
         sawtoothLabel.htmlFor = 'waveform-sawtooth';
         sawtoothLabel.textContent = 'Sawtooth';
-        sawtoothLabel.style.cssText = `color: #000; cuersor: pointer; font-size: 12px;`;
+        sawtoothLabel.style.cssText = `color: #000; cursor: pointer; font-size: 12px;`;
 
         waveformTypeDiv.appendChild(rmsRadio);
         waveformTypeDiv.appendChild(rmsLabel);
         waveformTypeDiv.appendChild(sawtoothRadio);
         waveformTypeDiv.appendChild(sawtoothLabel);
 
-        // RMS放大倍率滑块
+        // RMS amplification slider
         const amplificationDiv = document.createElement('div');
         amplificationDiv.style.cssText = `
             display: flex;
@@ -345,7 +344,7 @@
         amplificationDiv.appendChild(amplificationSlider);
         amplificationDiv.appendChild(amplificationValue);
         
-        // 音频波形显示区域
+        // Audio waveform display area
         const audioWaveformDiv = document.createElement('div');
         audioWaveformDiv.id = 'audio-waveform-display';
         audioWaveformDiv.style.cssText = `
@@ -361,7 +360,7 @@
         `;
         audioWaveformDiv.textContent = '';
 
-        // 组装面板
+        // Assemble panel
         content.appendChild(refreshPortsButton);
         content.appendChild(testConnectionButton);
         content.appendChild(button);
@@ -374,7 +373,7 @@
 
         document.body.appendChild(panel);
 
-        // 折叠展开
+        // Collapse/expand
         let isCollapsed = false;
         header.addEventListener('click', () => {
             isCollapsed = !isCollapsed;
@@ -387,19 +386,19 @@
             }
         });
 
-        // 绘制波形
+        // Draw waveform
         function drawWaveform(canvas, ctx, audioAnalyser, historyData, maxFrames) {
-            const bufferSize = audioAnalyser.frequencyBinCount; // 256个点
+            const bufferSize = audioAnalyser.frequencyBinCount; // 256 points
             
-            // 获取当前帧的时域数据
+            // Get current frame's time domain data
             const currentData = new Uint8Array(bufferSize);
             audioAnalyser.getByteTimeDomainData(currentData);
             
-            // 计算RMS值和锯齿波值
+            // Calculate RMS value and sawtooth wave value
             const rmsValue = calculateRMS(currentData);
             const sawtoothValue = calculateSawtooth(rmsValue, Date.now());
             
-            // 记录历史值
+            // Record historical values
             if (document.getElementById('waveform-sawtooth').checked) {
                 historyData.push(sawtoothValue);
             } else {
@@ -409,7 +408,7 @@
                 historyData.shift();
             }
             
-            // 绘制
+            // Draw
             ctx.fillStyle = '#f8f9fa';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = '#6c757d';
@@ -425,10 +424,10 @@
                 ctx.fillText('9999', 25, canvas.height - 2);
             }    
             if (document.getElementById('waveform-sawtooth').checked) {
-                // 绘制锯齿波
+                // Draw sawtooth waveform
                 drawSawtoothWaveform(ctx, canvas, historyData);
             } else {
-                // 绘制RMS波形
+                // Draw RMS waveform
                 drawRmsWaveform(ctx, canvas, historyData);
             }
             ctx.lineWidth = 1;
@@ -445,20 +444,19 @@
             try {
                 cleanup();
 
-                // 重置锯齿波相关变量
+                // Reset sawtooth wave related variables
                 previousRms = 0;
                 sawtoothPhase = 0;
                 sawtoothAmplitude = 0;
                 sawtoothFrequency = 0.3;
                 videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-                // 查找视频元素
+                // Find video element
                 const selectors = {
                     'youtube': '.html5-video-container',
                     'live.bilibili': '.live-player-mounter',
                     'tiktok': '.xgplayer-container',
                     'twitch': '.video-player__container',
-                    'haven': '.hls-player-content'
                 };
                 let videoWrapSelector = '.bpx-player-video-wrap';
                 for (const [key, selector] of Object.entries(selectors)) {
@@ -470,9 +468,9 @@
                 const videoWrap = document.querySelector(videoWrapSelector);
                 const video = videoWrap.querySelector('video');
                 if (!video) return;
-                window.videoElement = video; // 存储到全局变量
+                window.videoElement = video; // Store to global variable
 
-                // 显示音频波形区域
+                // Display audio waveform area
                 const waveformDisplay = document.getElementById('audio-waveform-display');
                 if (waveformDisplay) {
                     while (waveformDisplay.firstChild) {
@@ -494,7 +492,7 @@
                             
                             await new Promise(resolve => setTimeout(resolve, 50));
                             
-                            // 复用或创建节点
+                            // Reuse or create nodes
                             let audioCtx;
                             if (window.audioContext) {
                                 audioCtx = window.audioContext;
@@ -518,15 +516,15 @@
                             }
                             analyser.fftSize = 512;
                             
-                            // 连接节点: source -> analyser -> destination
+                            // Connect nodes: source -> analyser -> destination
                             source.connect(analyser);
                             analyser.connect(audioCtx.destination);
                             
-                            // 存储最近180帧的数据
+                            // Store last 180 frames of data
                             const maxFrames = 180;
                             const historyData = [];
                             
-                            // 绘制波形
+                            // Draw waveform
                             drawWaveform(canvas, ctx, analyser, historyData, maxFrames);
                         } catch (e) {
                             waveformDisplay.innerHTML = `<div style="text-align:center;color:#dc3545;">${e.message}</div>`;
@@ -535,8 +533,8 @@
                     }, 100);
                 }
 
-                window.videoUpdateInterval = setInterval(updateTimeDisplay, 50); // 50ms更新一次
-                updateTimeDisplay(); // 初始更新
+                window.videoUpdateInterval = setInterval(updateTimeDisplay, 50); // Update every 50ms
+                updateTimeDisplay(); // Initial update
             } catch (e) {
                 console.error('Failed to get video element:', e);
             }
@@ -559,7 +557,7 @@
         }
     }
 
-    // 更新时间显示
+    // Update time display
     const updateTimeDisplay = () => {
         videoMs = Math.round(window.videoElement.currentTime * 1000);
         if (!window.videoElement.paused) {
@@ -568,7 +566,7 @@
         }
     };
 
-    // 创建面板
+    // Create panel
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', createControlPanel);
     } else {
@@ -587,7 +585,7 @@
         });
     };
 
-    // 计算RMS值
+    // Calculate RMS value
     function calculateRMS(data) {
         let sum = 0;
         for (let i = 0; i < data.length; i++) {
@@ -612,14 +610,14 @@
         return smoothedValue;
     }
 
-    // 计算锯齿波
+    // Calculate sawtooth wave
     function calculateSawtooth(rmsValue, currentTime = Date.now()) {
-        // 检测鼓点（RMS值是否显著增加）
+        // Detect beats (whether RMS value significantly increases)
         const rmsChange = rmsValue - previousRms;
-        const thresholdForBeat = 0.2; // 鼓点检测阈值（累计变化量）
+        const thresholdForBeat = 0.2; // Beat detection threshold (cumulative change amount)
         
         if (rmsValue > previousRms) {
-            // 上升阶段
+            // Rising phase
             if (!rmsRising) {
                 rmsRising = true;
                 window.rmsAccumulatedIncrease = rmsChange;
@@ -627,75 +625,75 @@
                 window.rmsAccumulatedIncrease = (window.rmsAccumulatedIncrease || 0) + rmsChange;
             }
         } else {
-            // 从上升转为下降，检查是否达到鼓点阈值
+            // Transition from rising to falling, check if beat threshold is reached
             if (rmsRising && window.rmsAccumulatedIncrease && window.rmsAccumulatedIncrease >= thresholdForBeat) {
                 const now = currentTime;
                 beatHistory.push(now);
                 lastBeatTime = now;
-                const twoSecondsAgo = now - 1500; // 1500ms区间
+                const twoSecondsAgo = now - 1500; // 1500ms interval
                 beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
                 
                 if (beatHistory.length > 1) {
                     const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
                     if (timeSpan > 0) {
-                        const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // 每秒鼓点数
+                        const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // Beats per second
                         const beatFrequency = calculateY(beatFrequencyRaw);
-                        let calculatedFrequency = beatFrequency; // 锯齿波频率
+                        let calculatedFrequency = beatFrequency; // Sawtooth wave frequency
                         calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
                         sawtoothFrequency = calculatedFrequency;
                         sawtoothSkew = sawtoothFrequency > 2 ? 0.5 : 0.6;
                         // console.log(`[RMS ${rmsValue}] ${beatFrequencyRaw} -> ${beatFrequency} -> ${calculatedFrequency}`);
                     }
                 } else if (beatHistory.length === 1) {
-                    sawtoothFrequency = 0.3; // 只有一个鼓点，使用默认频率
+                    sawtoothFrequency = 0.3; // Only one beat, use default frequency
                 }
             }
-            // 结束上升阶段
+            // End rising phase
             rmsRising = false;
-            window.rmsAccumulatedIncrease = 0; // 重置累积上升值
+            window.rmsAccumulatedIncrease = 0; // Reset accumulated rise value
         }
     
         previousRms = rmsValue;
     
-        sawtoothAmplitude = Math.min(rmsValue * 2, 1); // 根据RMS值更新振幅
+        sawtoothAmplitude = Math.min(rmsValue * 2, 1); // Update amplitude based on RMS value
         
-        // 计算相位增量
+        // Calculate phase increment
         if (window.lastSawtoothTime) {
-            const actualDeltaTime = (currentTime - window.lastSawtoothTime) / 1000; // 转换为秒
+            const actualDeltaTime = (currentTime - window.lastSawtoothTime) / 1000; // Convert to seconds
             sawtoothPhase += sawtoothFrequency * actualDeltaTime;
         } else {
-            // 初始时使用固定时间增量
+            // Initially use fixed time increment
             const deltaTime = 1/30; // 30fps
             sawtoothPhase += sawtoothFrequency * deltaTime;
         }
         window.lastSawtoothTime = currentTime;
         if (sawtoothPhase >= 1) sawtoothPhase -= Math.floor(sawtoothPhase);
         
-        // 计算锯齿波值
+        // Calculate sawtooth wave value
         let rawSawtoothValue;
         if (sawtoothPhase < sawtoothSkew && sawtoothSkew !== 0) {
-            // 上升段
+            // Rising segment
             rawSawtoothValue = sawtoothPhase / sawtoothSkew;
         } else if (sawtoothSkew !== 1) {
-            // 下降段
+            // Falling segment
             rawSawtoothValue = (1 - sawtoothPhase) / (1 - sawtoothSkew);
         } else {
-            // 完全反向斜坡
+            // Completely reverse ramp
             rawSawtoothValue = 1 - sawtoothPhase;
         }
         
-        let normalizedSawtoothValue = rawSawtoothValue * 2 - 1; // 映射至-1到1
-        let sawtoothValue = normalizedSawtoothValue * sawtoothAmplitude; // 应用振幅
+        let normalizedSawtoothValue = rawSawtoothValue * 2 - 1; // Map to -1 to 1
+        let sawtoothValue = normalizedSawtoothValue * sawtoothAmplitude; // Apply amplitude
         videoSawtooth.shift();
         videoSawtooth.push(sawtoothValue);
         
-        // 计算滑动平均
+        // Calculate moving average
         const smoothedValue = videoSawtooth.reduce((sum, val) => sum + val, 0) / videoSawtooth.length;
         
         return smoothedValue;
     }
 
-    // 绘制RMS波形
+    // Draw RMS waveform
     function drawRmsWaveform(ctx, canvas, historyData) {
         if (historyData.length > 1) {
             ctx.lineWidth = 2;
@@ -710,7 +708,7 @@
         }
     }
 
-    // 绘制锯齿波
+    // Draw sawtooth waveform
     function drawSawtoothWaveform(ctx, canvas, historyData) {
         if (historyData.length > 1) {
             ctx.lineWidth = 2;
@@ -725,14 +723,14 @@
         }
     }
 
-    // 发送命令到串口
+    // Send command to serial port
     const sendPositionToSerial = async () => {
         if (!navigator.serial || !window.selectedSerialPort) return;
         try {
             if (!window.selectedSerialPort.readable) await window.selectedSerialPort.open({ baudRate: 115200 });
             const writer = window.selectedSerialPort.writable.getWriter();
             const tcodeCmd = `L0${currentPos}I50\n`;
-            console.log('[tcode]', tcodeCmd);
+            // console.log('[tcode]', tcodeCmd);
             await writer.write(new TextEncoder().encode(tcodeCmd));
             writer.releaseLock();
         } catch (e) { console.error('Failed to send serial command:', e); }
