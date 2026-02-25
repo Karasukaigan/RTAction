@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTAction
 // @namespace    http://tampermonkey.net/
-// @version      1.5.5
+// @version      1.6
 // @description  A tool that can convert the audio from videos on web pages into real-time actions for serial port devices.
 // @author       Karasukaigan
 // @match        https://*.bilibili.com/video/*
@@ -11,6 +11,7 @@
 // @match        https://*.youtube.com/watch*
 // @match        https://*.tiktok.com/*
 // @match        https://*.twitch.tv/*
+// @match        https://*.nicovideo.jp/watch/*
 // @grant        none
 // ==/UserScript==
 
@@ -22,7 +23,6 @@
     let previousPos = 9999; // Previous position
     let getVideoElementButton = null;
     window.videoElement = null; // Main video
-    var videoMs = 0; // Current milliseconds
     let currentTargets = []; // RMS value segments, actually deprecated
     var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 RMS values
     var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 sawtooth wave values
@@ -32,10 +32,8 @@
     var sawtoothPhase = 0; // Sawtooth wave phase
     var sawtoothAmplitude = 0; // Sawtooth wave amplitude
     var sawtoothFrequency = 0.3; // Sawtooth wave frequency
-    var beatThreshold = 0.06; // Beat detection threshold, lower is more sensitive
     var rmsAmplification = 4; // RMS amplification factor
     var beatHistory = []; // Recent beat timestamps
-    var lastBeatTime = 0; // Time of last detected beat
     
     const langTexts = {
         'zh': {
@@ -158,13 +156,13 @@
             color: white;
             border: none;
             border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 14px !important;
+            font-weight: 500 !important;
             cursor: pointer;
             margin-bottom: 10px;
             float: left;
             margin-right: 4%;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
         `;
 
         const testConnectionButton = document.createElement('button');
@@ -176,12 +174,12 @@
             color: #0d6efd;
             border: none;
             border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 14px !important;
+            font-weight: 500 !important;
             cursor: pointer;
             margin-bottom: 10px;
             float: right;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
         `;
         testConnectionButton.disabled = true;
         testConnectionButton.addEventListener('disabled', function() {
@@ -250,11 +248,11 @@
             color: #0d6efd;
             border: none;
             border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 14px !important;
+            font-weight: 500 !important;
             cursor: pointer;
             margin-bottom: 10px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
         `;
         getVideoElementButton = button;
 
@@ -457,6 +455,7 @@
                     'live.bilibili': '.live-player-mounter',
                     'tiktok': '.xgplayer-container',
                     'twitch': '.video-player__container',
+                    'nicovideo': '.PlayerPresenter'
                 };
                 let videoWrapSelector = '.bpx-player-video-wrap';
                 for (const [key, selector] of Object.entries(selectors)) {
@@ -559,7 +558,6 @@
 
     // Update time display
     const updateTimeDisplay = () => {
-        videoMs = Math.round(window.videoElement.currentTime * 1000);
         if (!window.videoElement.paused) {
             calcPos();
             if (previousPos !== currentPos) sendPositionToSerial();
@@ -629,7 +627,6 @@
             if (rmsRising && window.rmsAccumulatedIncrease && window.rmsAccumulatedIncrease >= thresholdForBeat) {
                 const now = currentTime;
                 beatHistory.push(now);
-                lastBeatTime = now;
                 const twoSecondsAgo = now - 1500; // 1500ms interval
                 beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
                 
@@ -637,7 +634,7 @@
                     const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
                     if (timeSpan > 0) {
                         const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // Beats per second
-                        const beatFrequency = calculateY(beatFrequencyRaw);
+                        const beatFrequency = Math.round(calculateY(beatFrequencyRaw) * 100) / 100;
                         let calculatedFrequency = beatFrequency; // Sawtooth wave frequency
                         calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
                         sawtoothFrequency = calculatedFrequency;
@@ -736,5 +733,5 @@
         } catch (e) { console.error('Failed to send serial command:', e); }
     };
 
-    const calculateY = x => x <= 4 ? x : (x >= 0 ? Math.pow(x-1, 1/4) : -Math.pow(1-x, 1/4));
+    const calculateY = x => x <= 4 ? x : (x <= 16 ? x / 4 : Math.pow(x-2, 1/4) + 1);
 })();
