@@ -19,6 +19,7 @@ RTAction is a browser-based [Tampermonkey](https://www.tampermonkey.net/) script
     - live.bilibili
 * `tiktok.com`
 * `twitch.tv`
+* `nicovideo.jp`
 
 ## Installation
 
