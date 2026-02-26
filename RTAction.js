@@ -17,6 +17,7 @@
 
 (function() {
     'use strict';
+    const ZERO_HISTORY = Object.freeze(Array(10).fill(0));
 
     const domain = window.location.hostname; // Domain name
     let currentPos = 5000; // Current position
@@ -24,16 +25,21 @@
     let getVideoElementButton = null;
     window.videoElement = null; // Main video
     let currentTargets = []; // RMS value segments, actually deprecated
-    var videoRms = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 RMS values
-    var videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // Last 10 sawtooth wave values
+    var videoRms = [...ZERO_HISTORY]; // Last 10 RMS values
+    var videoSawtooth = [...ZERO_HISTORY]; // Last 10 sawtooth wave values
     var previousRms = 0; // Previous RMS value
-    var rmsRising = false; // Whether RMS value is in rising phase
-    var sawtoothSkew = 0.6; // Skewness, 0 for reverse ramp, 0.5 for triangle wave, 1 for forward ramp
+    var sawtoothSkew = 0.4; // Skewness, 0 for reverse ramp, 0.5 for triangle wave, 1 for forward ramp
     var sawtoothPhase = 0; // Sawtooth wave phase
     var sawtoothAmplitude = 0; // Sawtooth wave amplitude
     var sawtoothFrequency = 0.3; // Sawtooth wave frequency
     var rmsAmplification = 4; // RMS amplification factor
-    var beatHistory = []; // Recent beat timestamps
+    var lastFrequencyData = null; // Previous frequency-domain frame
+    var onsetEnvelopeHistory = []; // Onset envelope history for tempo autocorrelation
+    var onsetTimeHistory = []; // Timestamps for onset envelope
+    var onsetBaseline = 0; // Slow baseline of onset score
+    var smoothedBpm = 0; // Continuously estimated BPM
+    var bpmConfidence = 0; // Confidence for BPM estimate
+    var lastTempoLogTime = 0; // Debug log throttle timestamp
     
     const langTexts = {
         'zh': {
@@ -54,12 +60,25 @@
     const mapValue = (value, min = 0, max = 1, newMin = 0, newMax = 9999) => {
         return ((Math.min(Math.max(value, min), max) - min) / (max - min)) * (newMax - newMin) + newMin;
     };
+    const isSawtoothMode = () => Boolean(document.getElementById('waveform-sawtooth')?.checked);
+    const getVideoWrapperSelector = () => {
+        const selectors = {
+            'youtube': '.html5-video-container',
+            'live.bilibili': '.live-player-mounter',
+            'tiktok': '.xgplayer-container',
+            'twitch': '.video-player__container',
+            'nicovideo': '.PlayerPresenter'
+        };
+        for (const [key, selector] of Object.entries(selectors)) {
+            if (domain.includes(key)) return selector;
+        }
+        return '.bpx-player-video-wrap';
+    };
 
     // Calculate position
     const calcPos = () => {
         previousPos = currentPos;
-        const isSawtoothMode = document.getElementById('waveform-sawtooth') && document.getElementById('waveform-sawtooth').checked;
-        if (isSawtoothMode) {
+        if (isSawtoothMode()) {
             // Use sawtooth wave value to calculate position
             currentPos = Math.round(mapValue((videoSawtooth[videoSawtooth.length - 1] + 1) / 2));
         } else {
@@ -391,14 +410,18 @@
             // Get current frame's time domain data
             const currentData = new Uint8Array(bufferSize);
             audioAnalyser.getByteTimeDomainData(currentData);
+            const frequencyData = new Uint8Array(bufferSize);
+            audioAnalyser.getByteFrequencyData(frequencyData);
             
-            // Calculate RMS value and sawtooth wave value
+            // Calculate RMS value and audio features
             const rmsValue = calculateRMS(currentData);
-            const sawtoothValue = calculateSawtooth(rmsValue, Date.now());
+            const audioFeatures = extractAudioFeatures(currentData, frequencyData, rmsValue);
+            const sawtoothValue = calculateSawtooth(rmsValue, audioFeatures, Date.now());
             
             // Record historical values
-            if (document.getElementById('waveform-sawtooth').checked) {
-                historyData.push(sawtoothValue);
+            if (isSawtoothMode()) {
+                // Keep visualization in sync with currentPos source (videoSawtooth latest sample)
+                historyData.push(videoSawtooth[videoSawtooth.length - 1] ?? sawtoothValue);
             } else {
                 historyData.push(rmsValue);
             }
@@ -412,7 +435,7 @@
             ctx.fillStyle = '#6c757d';
             ctx.font = '10px Arial';
             ctx.textAlign = 'right';
-            if (document.getElementById('waveform-sawtooth').checked) {
+            if (isSawtoothMode()) {
                 ctx.fillText('9999', 25, 10);
                 ctx.fillText('5000', 25, canvas.height/2);
                 ctx.fillText('0', 25, canvas.height - 2);
@@ -421,12 +444,12 @@
                 ctx.fillText('5000', 25, canvas.height/2);
                 ctx.fillText('9999', 25, canvas.height - 2);
             }    
-            if (document.getElementById('waveform-sawtooth').checked) {
+            if (isSawtoothMode()) {
                 // Draw sawtooth waveform
-                drawSawtoothWaveform(ctx, canvas, historyData);
+                drawWaveformLine(ctx, canvas, historyData, '#28a745', value => (value + 1) * 0.5);
             } else {
                 // Draw RMS waveform
-                drawRmsWaveform(ctx, canvas, historyData);
+                drawWaveformLine(ctx, canvas, historyData, '#0d6efd');
             }
             ctx.lineWidth = 1;
             ctx.strokeStyle = '#adb5bd';
@@ -447,24 +470,19 @@
                 sawtoothPhase = 0;
                 sawtoothAmplitude = 0;
                 sawtoothFrequency = 0.3;
-                videoSawtooth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                videoSawtooth = [...ZERO_HISTORY];
+                lastFrequencyData = null;
+                onsetEnvelopeHistory = [];
+                onsetTimeHistory = [];
+                onsetBaseline = 0;
+                smoothedBpm = 0;
+                bpmConfidence = 0;
+                lastTempoLogTime = 0;
+                window.lastSawtoothTime = null;
 
                 // Find video element
-                const selectors = {
-                    'youtube': '.html5-video-container',
-                    'live.bilibili': '.live-player-mounter',
-                    'tiktok': '.xgplayer-container',
-                    'twitch': '.video-player__container',
-                    'nicovideo': '.PlayerPresenter'
-                };
-                let videoWrapSelector = '.bpx-player-video-wrap';
-                for (const [key, selector] of Object.entries(selectors)) {
-                    if (domain.includes(key)) {
-                        videoWrapSelector = selector;
-                        break;
-                    }
-                }
-                const videoWrap = document.querySelector(videoWrapSelector);
+                const videoWrap = document.querySelector(getVideoWrapperSelector());
+                if (!videoWrap) return;
                 const video = videoWrap.querySelector('video');
                 if (!video) return;
                 window.videoElement = video; // Store to global variable
@@ -608,47 +626,160 @@
         return smoothedValue;
     }
 
-    // Calculate sawtooth wave
-    function calculateSawtooth(rmsValue, currentTime = Date.now()) {
-        // Detect beats (whether RMS value significantly increases)
-        const rmsChange = rmsValue - previousRms;
-        const thresholdForBeat = 0.2; // Beat detection threshold (cumulative change amount)
-        
-        if (rmsValue > previousRms) {
-            // Rising phase
-            if (!rmsRising) {
-                rmsRising = true;
-                window.rmsAccumulatedIncrease = rmsChange;
-            } else {
-                window.rmsAccumulatedIncrease = (window.rmsAccumulatedIncrease || 0) + rmsChange;
-            }
-        } else {
-            // Transition from rising to falling, check if beat threshold is reached
-            if (rmsRising && window.rmsAccumulatedIncrease && window.rmsAccumulatedIncrease >= thresholdForBeat) {
-                const now = currentTime;
-                beatHistory.push(now);
-                const twoSecondsAgo = now - 1500; // 1500ms interval
-                beatHistory = beatHistory.filter(time => time > twoSecondsAgo);
-                
-                if (beatHistory.length > 1) {
-                    const timeSpan = beatHistory[beatHistory.length - 1] - beatHistory[0];
-                    if (timeSpan > 0) {
-                        const beatFrequencyRaw = (beatHistory.length - 1) / (timeSpan / 1000); // Beats per second
-                        const beatFrequency = Math.round(calculateY(beatFrequencyRaw) * 100) / 100;
-                        let calculatedFrequency = beatFrequency; // Sawtooth wave frequency
-                        calculatedFrequency = Math.max(0.1, Math.min(calculatedFrequency, 4));
-                        sawtoothFrequency = calculatedFrequency;
-                        sawtoothSkew = sawtoothFrequency > 2 ? 0.5 : 0.6;
-                        // console.log(`[RMS ${rmsValue}] ${beatFrequencyRaw} -> ${beatFrequency} -> ${calculatedFrequency}`);
-                    }
-                } else if (beatHistory.length === 1) {
-                    sawtoothFrequency = 0.3; // Only one beat, use default frequency
-                }
-            }
-            // End rising phase
-            rmsRising = false;
-            window.rmsAccumulatedIncrease = 0; // Reset accumulated rise value
+    // Extract rhythm features from original audio signal
+    function extractAudioFeatures(timeData, frequencyData, rmsValue) {
+        let lowBandSum = 0;
+        let totalBandSum = 0;
+        const lowBandEnd = Math.max(4, Math.floor(frequencyData.length * 0.12));
+        for (let i = 0; i < frequencyData.length; i++) {
+            totalBandSum += frequencyData[i];
+            if (i < lowBandEnd) lowBandSum += frequencyData[i];
         }
+        const lowBandEnergy = lowBandEnd > 0 ? (lowBandSum / lowBandEnd) / 255 : 0;
+        const lowBandRatio = totalBandSum > 0 ? lowBandSum / totalBandSum : 0;
+
+        let spectralFlux = 0;
+        if (lastFrequencyData && lastFrequencyData.length === frequencyData.length) {
+            for (let i = 0; i < frequencyData.length; i++) {
+                const diff = frequencyData[i] - lastFrequencyData[i];
+                if (diff > 0) spectralFlux += diff;
+            }
+            spectralFlux /= frequencyData.length * 255;
+        }
+        lastFrequencyData = frequencyData.slice();
+
+        let zeroCrossings = 0;
+        for (let i = 1; i < timeData.length; i++) {
+            const prev = timeData[i - 1] - 128;
+            const curr = timeData[i] - 128;
+            if ((prev >= 0 && curr < 0) || (prev < 0 && curr >= 0)) zeroCrossings++;
+        }
+        const zcr = timeData.length > 1 ? zeroCrossings / (timeData.length - 1) : 0;
+        const rmsRise = Math.max(0, rmsValue - previousRms);
+
+        // Onset score: partially rely on raw audio spectral change, then combine with RMS rise
+        const onsetScore = Math.max(0, Math.min(1,
+            (spectralFlux * 0.5) +
+            (lowBandEnergy * 0.2) +
+            (lowBandRatio * 0.2) +
+            (rmsRise * 1.4) -
+            (Math.abs(zcr - 0.12) * 0.08)
+        ));
+
+        return { lowBandEnergy, lowBandRatio, spectralFlux, zcr, onsetScore };
+    }
+
+    function pushOnsetSample(onsetScore, currentTime) {
+        onsetBaseline = onsetBaseline * 0.92 + onsetScore * 0.08;
+        const pulse = Math.max(0, onsetScore - onsetBaseline * 0.92);
+        onsetEnvelopeHistory.push(pulse);
+        onsetTimeHistory.push(currentTime);
+
+        const keepMs = 9000;
+        while (onsetTimeHistory.length > 0 && onsetTimeHistory[0] < currentTime - keepMs) {
+            onsetTimeHistory.shift();
+            onsetEnvelopeHistory.shift();
+        }
+    }
+
+    function estimateTempoFromHistory() {
+        const n = onsetEnvelopeHistory.length;
+        if (n < 120 || onsetTimeHistory.length !== n) return { bpm: 0, confidence: 0 };
+
+        const spanMs = onsetTimeHistory[n - 1] - onsetTimeHistory[0];
+        if (spanMs < 2800) return { bpm: 0, confidence: 0 };
+        const avgDt = (spanMs / (n - 1)) / 1000;
+        if (!Number.isFinite(avgDt) || avgDt <= 0) return { bpm: 0, confidence: 0 };
+
+        const minBpm = 65;
+        const maxBpm = 190;
+        const minLag = Math.max(2, Math.floor((60 / maxBpm) / avgDt));
+        const maxLag = Math.min(n - 2, Math.ceil((60 / minBpm) / avgDt));
+        if (maxLag <= minLag) return { bpm: 0, confidence: 0 };
+
+        let mean = 0;
+        for (let i = 0; i < n; i++) mean += onsetEnvelopeHistory[i];
+        mean /= n;
+
+        const normalized = new Array(n);
+        let energy = 0;
+        for (let i = 0; i < n; i++) {
+            const v = Math.max(0, onsetEnvelopeHistory[i] - mean * 0.6);
+            normalized[i] = v;
+            energy += v * v;
+        }
+        if (energy < 1e-7) return { bpm: 0, confidence: 0 };
+
+        const corrCache = new Map();
+        const corrAt = (lag) => {
+            if (corrCache.has(lag)) return corrCache.get(lag);
+            let cross = 0;
+            let normA = 0;
+            let normB = 0;
+            for (let i = lag; i < n; i++) {
+                const a = normalized[i];
+                const b = normalized[i - lag];
+                cross += a * b;
+                normA += a * a;
+                normB += b * b;
+            }
+            const value = (normA > 0 && normB > 0) ? (cross / Math.sqrt(normA * normB)) : 0;
+            corrCache.set(lag, value);
+            return value;
+        };
+
+        let bestLag = 0;
+        let bestScore = 0;
+        for (let lag = minLag; lag <= maxLag; lag++) {
+            const base = corrAt(lag);
+            const halfLag = Math.round(lag / 2);
+            const doubleLag = lag * 2;
+            const half = halfLag >= minLag ? corrAt(halfLag) : 0;
+            const dbl = doubleLag <= maxLag ? corrAt(doubleLag) : 0;
+            const score = base + dbl * 0.35 + half * 0.2;
+            if (score > bestScore) {
+                bestScore = score;
+                bestLag = lag;
+            }
+        }
+        if (!bestLag) return { bpm: 0, confidence: 0 };
+
+        let bpm = 60 / (bestLag * avgDt);
+        while (bpm < minBpm) bpm *= 2;
+        while (bpm > maxBpm) bpm /= 2;
+        const confidence = Math.max(0, Math.min(1, (bestScore - 0.1) / 0.45));
+        return { bpm, confidence };
+    }
+
+    function updateTempoFromAudio(audioFeatures, currentTime) {
+        const onsetScore = audioFeatures?.onsetScore ?? 0;
+        pushOnsetSample(onsetScore, currentTime);
+
+        const { bpm, confidence } = estimateTempoFromHistory();
+        if (bpm > 0) {
+            if (smoothedBpm <= 0) smoothedBpm = bpm;
+            const alpha = confidence > 0.55 ? 0.24 : 0.1;
+            smoothedBpm = smoothedBpm * (1 - alpha) + bpm * alpha;
+            bpmConfidence = bpmConfidence * 0.85 + confidence * 0.15;
+        } else {
+            bpmConfidence *= 0.98;
+        }
+
+        const beatFrequencyRaw = smoothedBpm > 0 ? smoothedBpm / 60 : 0;
+        const mappedFrequency = Math.round(calculateY(beatFrequencyRaw) * 100) / 100;
+        sawtoothFrequency = Math.max(0.1, Math.min(mappedFrequency, 4));
+        console.log(`[${currentPos}] [${bpm}] ${beatFrequencyRaw} -> ${mappedFrequency} -> ${sawtoothFrequency}`);
+
+        if (window.RTActionTempoDebug && currentTime - lastTempoLogTime > 500) {
+            console.log(`[tempo] bpm=${smoothedBpm.toFixed(1)} conf=${bpmConfidence.toFixed(2)} rawHz=${beatFrequencyRaw.toFixed(2)} targetHz=${targetFrequency.toFixed(2)}`);
+            lastTempoLogTime = currentTime;
+        }
+    }
+
+    // Calculate sawtooth wave
+    function calculateSawtooth(rmsValue, audioFeatures, currentTime = Date.now()) {
+        updateTempoFromAudio(audioFeatures, currentTime);
+        sawtoothSkew = sawtoothFrequency > 2 ? 0.5 : 0.6;
     
         previousRms = rmsValue;
     
@@ -691,33 +822,17 @@
     }
 
     // Draw RMS waveform
-    function drawRmsWaveform(ctx, canvas, historyData) {
-        if (historyData.length > 1) {
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = '#0d6efd';
-            ctx.beginPath();
-            const sliceWidth = (canvas.width - 30) / (historyData.length - 1);
-            for (let i = 0; i < historyData.length; i++) {
-                const y = canvas.height - (historyData[i] * canvas.height);
-                i === 0 ? ctx.moveTo(30, y) : ctx.lineTo(i * sliceWidth + 30, y);
-            }
-            ctx.stroke();
+    function drawWaveformLine(ctx, canvas, historyData, color, normalizeY = value => value) {
+        if (historyData.length <= 1) return;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        const sliceWidth = (canvas.width - 30) / (historyData.length - 1);
+        for (let i = 0; i < historyData.length; i++) {
+            const y = canvas.height - (normalizeY(historyData[i]) * canvas.height);
+            i === 0 ? ctx.moveTo(30, y) : ctx.lineTo(i * sliceWidth + 30, y);
         }
-    }
-
-    // Draw sawtooth waveform
-    function drawSawtoothWaveform(ctx, canvas, historyData) {
-        if (historyData.length > 1) {
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = '#28a745';
-            ctx.beginPath();
-            const sliceWidth = (canvas.width - 30) / (historyData.length - 1);
-            for (let i = 0; i < historyData.length; i++) {
-                const y = canvas.height - ((historyData[i] + 1) * 0.5 * canvas.height);
-                i === 0 ? ctx.moveTo(30, y) : ctx.lineTo(i * sliceWidth + 30, y);
-            }
-            ctx.stroke();
-        }
+        ctx.stroke();
     }
 
     // Send command to serial port
@@ -733,5 +848,6 @@
         } catch (e) { console.error('Failed to send serial command:', e); }
     };
 
+    // Map beat frequency (Hz) to sawtooth frequency (Hz) with softer compression at high tempos
     const calculateY = x => x <= 4 ? x : (x <= 16 ? x / 4 : Math.pow(x-2, 1/4) + 1);
 })();
